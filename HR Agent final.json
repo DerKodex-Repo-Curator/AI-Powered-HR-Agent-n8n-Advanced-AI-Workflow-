@@ -1,0 +1,533 @@
+{
+  "name": "HR Agent final",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "=30 11 * * 0-4"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        160,
+        240
+      ],
+      "id": "c193a218-af95-4fb3-bc2e-b5514fda34a1",
+      "name": "Schedule Trigger1"
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "hr.employee",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "id",
+            "name",
+            "mobile_phone",
+            "resource_calendar_id",
+            "work_email"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        608,
+        48
+      ],
+      "id": "6dd8d364-5438-4661-b143-6c907e050c09",
+      "name": "Get hr.employee",
+      "credentials": {
+        "odooApi": {
+          "id": "Zb4G4MMWYWjxblp3",
+          "name": "Admin Credititional"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "resource.calendar.attendance",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "calendar_id",
+            "dayofweek",
+            "hour_from",
+            "hour_to",
+            "name"
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        608,
+        432
+      ],
+      "id": "41771400-6ee0-4df1-8e24-30b1edd68549",
+      "name": "Get Many (resource.calendar.attendance)",
+      "credentials": {
+        "odooApi": {
+          "id": "Zb4G4MMWYWjxblp3",
+          "name": "Admin Credititional"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "custom",
+        "customResource": "hr.attendance",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "fieldsList": [
+            "check_in",
+            "check_out",
+            "employee_id",
+            "display_name",
+            "in_location",
+            "in_longitude",
+            "in_latitude"
+          ]
+        },
+        "filterRequest": {
+          "filter": [
+            {
+              "fieldName": "check_in",
+              "operator": "greaterOrEqual",
+              "value": "={{ DateTime.now().setZone('Africa/Cairo').startOf('day').minus({hours: 2}).toUTC().toISO().replace('+00:00','').replace('Z','') }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 1,
+      "position": [
+        608,
+        240
+      ],
+      "id": "0e3d88a3-e5db-4dc3-9f09-3bc45c986abe",
+      "name": "Get many items",
+      "credentials": {
+        "odooApi": {
+          "id": "Zb4G4MMWYWjxblp3",
+          "name": "Admin Credititional"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── 1) سحب البيانات من نود الـ Merge ──\n// الميرج بيجمع كل الـ Items اللي جاية من الـ 3 مسارات في قائمة واحدة\nconst allItems = $input.all();\n\n// تصنيف البيانات بناءً على الحقول المميزة لكل نوع\nconst calendarItems = allItems.filter(i => i.json.hour_from !== undefined && i.json.calendar_id !== undefined);\nconst employeeItems = allItems.filter(i => i.json.resource_calendar_id !== undefined && i.json.id !== undefined);\nconst attendanceItems = allItems.filter(i => i.json.employee_id !== undefined && (i.json.check_in !== undefined || i.json.display_name !== undefined));\n\n// لو مفيش حضور نرجع خطأ واضح\nif (!attendanceItems.length) {\n  return [{\n    json: {\n      error: \"لا توجد بيانات حضور واصلة لنود الكود.\",\n      counts: {\n        totalItemsFromMerge: allItems.length,\n        calendarFound: calendarItems.length,\n        employeeFound: employeeItems.length,\n        attendanceFound: attendanceItems.length\n      }\n    }\n  }];\n}\n\n// ── 2) وظائف الحسابات ──\nfunction parseDisplay(display) {\n  const m = String(display || \"\").match(/from\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?\\s*(AM|PM)/i);\n  if (!m) return null;\n  let h = Number(m[1]);\n  const min = Number(m[2]);\n  const ampm = m[4].toUpperCase();\n  if (ampm === \"PM\" && h < 12) h += 12;\n  if (ampm === \"AM\" && h === 12) h = 0;\n  return { h, min };\n}\n\nfunction getDistance(lat1, lon1, lat2, lon2) {\n  const R = 6371000;\n  const dLat = (lat2 - lat1) * Math.PI / 180;\n  const dLon = (lon2 - lon1) * Math.PI / 180;\n  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +\n    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *\n    Math.sin(dLon / 2) * Math.sin(dLon / 2);\n  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));\n}\n\n// ── 3) بناء خريطة الورديات ──\nconst shiftMap = {};\ncalendarItems.forEach(item => {\n  const calId = Array.isArray(item.json.calendar_id) ? item.json.calendar_id[0] : item.json.calendar_id;\n  const hf = Number(item.json.hour_from);\n  if (calId && (shiftMap[calId] === undefined || hf < shiftMap[calId])) {\n    shiftMap[calId] = Math.floor(hf);\n  }\n});\n\n// ── 4) ربط الموظفين (شيفت + إيميل) ──\nconst empShiftMap = {};\nconst empEmailMap = {};\nemployeeItems.forEach(emp => {\n  const calId = Array.isArray(emp.json.resource_calendar_id)\n    ? emp.json.resource_calendar_id[0]\n    : emp.json.resource_calendar_id;\n  const empId = emp.json.id;\n  empShiftMap[empId] = shiftMap[calId] ?? 9;\n  empEmailMap[empId] = emp.json.work_email || '';\n});\n\n// ── 5) معالجة الحضور ──\nconst COMPANY_LAT = 30.015309;\nconst COMPANY_LNG = 31.436322;\nconst RADIUS_METERS = 3000;\n\nreturn attendanceItems.map(item => {\n  const a = item.json;\n  const t = parseDisplay(a.display_name);\n  if (!t) return null;\n\n  const empId = Array.isArray(a.employee_id) ? a.employee_id[0] : a.employee_id;\n  const shiftHour = empShiftMap[empId] ?? 9;\n  const lateMinutesRaw = (t.h * 60 + t.min) - (shiftHour * 60);\n\n  const lat = parseFloat(a.in_latitude);\n  const lng = parseFloat(a.in_longitude);\n\n  let locationStatus = \"no_gps\";\n  let distanceText = null;\n\n  if (Number.isFinite(lat) && Number.isFinite(lng)) {\n    const dist = getDistance(lat, lng, COMPANY_LAT, COMPANY_LNG);\n    locationStatus = dist <= RADIUS_METERS ? \"in_office\" : \"outside\";\n    distanceText = dist < 1000 ? `${Math.round(dist)} متر` : `${(dist / 1000).toFixed(2)} كم`;\n  }\n\n  return {\n    json: {\n      employee_id: empId,\n      employeeName: Array.isArray(a.employee_id) ? a.employee_id[1] : \"Unknown\",\n      work_email: empEmailMap[empId] || '',\n      display_time_hhmm: `${String(t.h).padStart(2, '0')}:${String(t.min).padStart(2, '0')}`,\n      shiftStart: `${shiftHour}:00`,\n      lateMinutes: lateMinutesRaw > 0 ? lateMinutesRaw : 0,\n      locationStatus,\n      distanceText,\n      in_location: a.in_location ?? null\n    }\n  };\n}).filter(Boolean);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        160
+      ],
+      "id": "281db6e7-8b14-4a0a-a672-373d91564ab3",
+      "name": "Parse Display Time"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst toNum = (v) => {\n  const n = Number(v);\n  return Number.isFinite(n) ? n : 0;\n};\nconst norm = (v) => String(v ?? '').trim().toLowerCase();\n\nconst late = items\n  .filter(i => toNum(i.json.lateMinutes) > 0)\n  .sort((a, b) => toNum(b.json.lateMinutes) - toNum(a.json.lateMinutes));\n\nconst outside = items\n  .filter(i => norm(i.json.locationStatus) === 'outside');\n\nconst total = items.length;\n\nconst date = new Date().toLocaleDateString('en-CA');\nconst generatedAt = new Date().toLocaleString('ar-EG');\n\nconst lateRows = late.map((e, idx) => `\n  <tr>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${idx + 1}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee; font-weight:600;\">${e.json.employeeName ?? '-'}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${e.json.display_time_hhmm ?? '-'}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${e.json.shiftStart ?? '-'}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee; font-weight:700; color:#e65100;\">\n      ${toNum(e.json.lateMinutes)} دقيقة\n    </td>\n  </tr>\n`).join('');\n\nconst outsideRows = outside.map((e, idx) => `\n  <tr>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${idx + 1}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee; font-weight:600;\">${e.json.employeeName ?? '-'}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${e.json.display_time_hhmm ?? '-'}</td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee; color:#c62828; font-weight:700;\">\n      ${e.json.distanceText ?? '-'}\n    </td>\n    <td style=\"padding:10px; border-bottom:1px solid #eee;\">${e.json.in_location ?? 'غير محدد'}</td>\n  </tr>\n`).join('');\n\nconst html = `\n<div dir=\"rtl\" style=\"font-family:Arial, sans-serif; background:#fafafa; padding:20px;\">\n  <div style=\"max-width:900px; margin:0 auto; background:#fff; border:1px solid #eee; border-radius:12px; overflow:hidden;\">\n    \n    <div style=\"padding:18px 20px; background:linear-gradient(90deg,#1a1a2e,#2b2b55); color:#fff;\">\n      <div style=\"font-size:20px; font-weight:700;\">📊 تقرير الحضور اليومي — ${date}</div>\n      <div style=\"opacity:.85; margin-top:6px; font-size:12px;\">تم إنشاء التقرير تلقائياً — ${generatedAt}</div>\n    </div>\n\n    <!-- Summary cards -->\n    <div style=\"display:flex; gap:12px; padding:16px 20px; flex-wrap:wrap;\">\n      <div style=\"flex:1; min-width:180px; background:#e8f5e9; border:1px solid #c8e6c9; padding:14px; border-radius:10px;\">\n        <div style=\"font-size:26px; font-weight:800; color:#2e7d32;\">${total}</div>\n        <div style=\"color:#2e7d32; font-weight:600;\">إجمالي الحضور</div>\n      </div>\n      <div style=\"flex:1; min-width:180px; background:#fff3e0; border:1px solid #ffe0b2; padding:14px; border-radius:10px;\">\n        <div style=\"font-size:26px; font-weight:800; color:#e65100;\">${late.length}</div>\n        <div style=\"color:#e65100; font-weight:600;\">متأخرين</div>\n      </div>\n      <div style=\"flex:1; min-width:180px; background:#ffebee; border:1px solid #ffcdd2; padding:14px; border-radius:10px;\">\n        <div style=\"font-size:26px; font-weight:800; color:#c62828;\">${outside.length}</div>\n        <div style=\"color:#c62828; font-weight:600;\">خارج نطاق الشركة</div>\n      </div>\n    </div>\n\n    <!-- Late table -->\n    <div style=\"padding:0 20px 18px;\">\n      <div style=\"display:flex; align-items:center; justify-content:space-between; margin:8px 0 10px;\">\n        <h3 style=\"margin:0; color:#e65100;\">⏰ كشف المتأخرين</h3>\n        <span style=\"font-size:12px; color:#777;\">مرتّب حسب أكبر تأخير</span>\n      </div>\n\n      <table style=\"width:100%; border-collapse:collapse; border:1px solid #eee; border-radius:10px; overflow:hidden;\">\n        <thead>\n          <tr style=\"background:#ff8c00; color:#fff;\">\n            <th style=\"padding:10px; text-align:right;\">#</th>\n            <th style=\"padding:10px; text-align:right;\">الاسم</th>\n            <th style=\"padding:10px; text-align:right;\">وقت الحضور</th>\n            <th style=\"padding:10px; text-align:right;\">وقت الشيفت</th>\n            <th style=\"padding:10px; text-align:right;\">التأخير</th>\n          </tr>\n        </thead>\n        <tbody>\n          ${lateRows || `<tr><td colspan=\"5\" style=\"padding:12px; text-align:center; color:#555;\">لا يوجد متأخرين اليوم ✅</td></tr>`}\n        </tbody>\n      </table>\n    </div>\n\n    <!-- Outside table -->\n    <div style=\"padding:0 20px 22px;\">\n      <h3 style=\"margin:0 0 10px; color:#c62828;\">📍 كشف خارج النطاق</h3>\n\n      <table style=\"width:100%; border-collapse:collapse; border:1px solid #eee; border-radius:10px; overflow:hidden;\">\n        <thead>\n          <tr style=\"background:#ff4444; color:#fff;\">\n            <th style=\"padding:10px; text-align:right;\">#</th>\n            <th style=\"padding:10px; text-align:right;\">الاسم</th>\n            <th style=\"padding:10px; text-align:right;\">وقت الحضور</th>\n            <th style=\"padding:10px; text-align:right;\">المسافة</th>\n            <th style=\"padding:10px; text-align:right;\">الموقع</th>\n          </tr>\n        </thead>\n        <tbody>\n          ${outsideRows || `<tr><td colspan=\"5\" style=\"padding:12px; text-align:center; color:#555;\">الجميع داخل نطاق الشركة ✅</td></tr>`}\n        </tbody>\n      </table>\n\n      <div style=\"margin-top:10px; font-size:11px; color:#888;\">\n        ملاحظة: \"خارج النطاق\" بناءً على GPS والمسافة المحددة في الإعدادات.\n      </div>\n    </div>\n\n  </div>\n</div>\n`;\n\nreturn [{\n  json: {\n    to: \"ashrqat@thelvx.com\",\n    subject: `📊 تقرير الحضور — ${date} | ${late.length} متأخر | ${outside.length} خارج النطاق`,\n    html\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1312,
+        352
+      ],
+      "id": "9a2f7482-49c2-4b59-b7c5-03b3ac808b93",
+      "name": "Build HTML Email"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1536,
+        288
+      ],
+      "id": "ba58b4cc-be8f-4673-ad7a-08a5a73f86e9",
+      "name": "Send a message",
+      "webhookId": "664d2392-7a7b-42e5-9ebd-05e88cff5c22",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "puku7VTPgid14Iz0",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## workflow",
+        "height": 672,
+        "width": 2112,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d514c5a2-45ae-4da1-8922-61ec6468d175",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        720,
+        752
+      ],
+      "id": "b5a57fd1-0d4d-4156-b0af-ca4cf12287b1",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "sendTo": "asemlvx@gmail.com",
+        "subject": "error in HR Agent",
+        "message": "Error in HR Agent",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        944,
+        752
+      ],
+      "id": "97cddca7-eb4c-416e-b65f-9829b1fff7e9",
+      "name": "Send a message1",
+      "webhookId": "6a12f7b0-e272-4989-97b8-e56ef36677db",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "puku7VTPgid14Iz0",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Error Trigger",
+        "height": 224,
+        "width": 848,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        336,
+        704
+      ],
+      "typeVersion": 1,
+      "id": "8da9290f-6cc4-4be7-8d86-9cd48fa3e3e8",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "sendTo": "=haaaag@gmail.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1520,
+        480
+      ],
+      "id": "493cbe89-ded9-441d-97e3-640d1a8b294f",
+      "name": "Send a message2",
+      "webhookId": "664d2392-7a7b-42e5-9ebd-05e88cff5c22",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "puku7VTPgid14Iz0",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "13rzJZ4NDjRZS-bteoExW1w9UU5YEAoSb1oij2L1DPGA",
+          "mode": "list",
+          "cachedResultName": "Get hr.employee",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/13rzJZ4NDjRZS-bteoExW1w9UU5YEAoSb1oij2L1DPGA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/13rzJZ4NDjRZS-bteoExW1w9UU5YEAoSb1oij2L1DPGA/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "employee_id": "={{ $json.employee_id }}",
+            "employee_name": "={{ $json.employeeName }}",
+            "late_minutes": "={{ $json.lateMinutes }}",
+            "shift_start": "={{ $json.shiftStart }}",
+            "work_email": "={{ $json.work_email }}",
+            "check_in_time": "={{ $json.display_time_hhmm }}",
+            "date": "={{ $now.toFormat('yyyy-MM-dd') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "employee_id",
+              "displayName": "employee_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "employee_name",
+              "displayName": "employee_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "work_email",
+              "displayName": "work_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "day",
+              "displayName": "day",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": true
+            },
+            {
+              "id": "check_in_time",
+              "displayName": "check_in_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "shift_start",
+              "displayName": "shift_start",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "late_minutes",
+              "displayName": "late_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1472,
+        48
+      ],
+      "id": "e1e8b8ab-56c3-4c2c-9bbb-448ea7d9f328",
+      "name": "Append row in sheet",
+      "executeOnce": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "5RvPbeshpF42xekr",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        896,
+        224
+      ],
+      "id": "8f7cf001-bd86-463a-9150-d08554826e4a",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Get hr.employee",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get many items",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Many (resource.calendar.attendance)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get hr.employee": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Many (resource.calendar.attendance)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Get many items": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Parse Display Time": {
+      "main": [
+        [
+          {
+            "node": "Build HTML Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML Email": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Parse Display Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true,
+    "timeSavedMode": "fixed",
+    "timezone": "Africa/Cairo",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "8dfc09f3-f3a9-4f6c-a405-ef3f85f7410c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f2bc043fe69d31a15311aa2cd21b3ee292a856ab9721a5e17b127c2d9716878a"
+  },
+  "id": "pTmOOy1H8UBfiPkJnL5Xm",
+  "tags": []
+}
