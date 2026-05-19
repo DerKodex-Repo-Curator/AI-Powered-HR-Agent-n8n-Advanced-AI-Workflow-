@@ -64,7 +64,7 @@ ai-hr-agent/
 ├── agent-chat-interface.png       # Screenshot of the n8n AI chat interface
 └── README.md                      # Project documentation
 👤 Author
-Asem Ahmed — AI Automation Engineer & Data Scientist
+Asem Ahmed — AI Automation Engineer 
 
 Specializing in Multi-Agent systems, Enterprise Automation, and LLM integrations.
 
